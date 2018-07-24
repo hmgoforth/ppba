@@ -23,10 +23,9 @@ from pdb import set_trace as st
 import argparse
 import glob
 
-def fwdAddLK(img, tmpl, tol):
+def fwdAddLK(img, tmpl, tol, p):
 	batch_size, k, h, w = img.size()
 
-	p = torch.zeros(1, 8, 1)
 	dp = torch.zeros(1, 8, 1)
 
 	crit = 0
@@ -34,12 +33,16 @@ def fwdAddLK(img, tmpl, tol):
 	itn = 1
 
 	grad_func = dlk.GradientBatch()
-	inv_func = dlk.InverseBatch()
+	inv_func = dlk.InverseBatchFun
 
 	img_gradx, img_grady = grad_func(img)
 
 	while (itn == 1) or (crit > tol):
 		img_w, mask_w = dlk.warp_hmg(img, p)
+
+		transforms.ToPILImage()(img_w[0,:,:,:]).show()
+		transforms.ToPILImage()(tmpl[0,:,:,:]).show()
+
 		mask_w.unsqueeze_(1)
 		mask_w = mask_w.repeat(1, k, 1, 1)
 		tmpl_mask = tmpl.mul(mask_w)
@@ -91,9 +94,9 @@ def fwdAddLK(img, tmpl, tol):
 
 		p = p + dp
 
-		itn = itn + 1
-
 		print('itn: {:d}, crit: {:.2f}'.format(itn, crit))
+
+		itn = itn + 1
 
 	print('finished at iteration ', itn)
 
@@ -244,10 +247,10 @@ def test_fwdAddLK():
 	p_gt = torch.FloatTensor([[
 		[0],
 		[0],
-		[10],
 		[0],
 		[0],
-		[10],
+		[0],
+		[0],
 		[0],
 		[0]
 		]])
@@ -257,7 +260,7 @@ def test_fwdAddLK():
 	# transforms.ToPILImage()(img_tens[0,:,:,:]).show()
 	# transforms.ToPILImage()(img_tens_w[0,:,:,:]).show()
 
-	p_falk = fwdAddLK(img_tens, img_tens_w, 1e-3)
+	p_falk = fwdAddLK(img_tens, img_tens_w, 1e-3, p_gt)
 
 	img_tens_falk_w, _ = dlk.warp_hmg(img_tens, p_falk)
 
@@ -312,6 +315,6 @@ def test_fwdAddLKParamComp():
 	# transforms.ToPILImage()(img_tens_falk_w[0,:,:,:]).show()
 
 if __name__ == "__main__":
-	# test_fwdAddLK()
-	test_fwdAddLKParamComp()
+	test_fwdAddLK()
+	# test_fwdAddLKParamComp()
 
