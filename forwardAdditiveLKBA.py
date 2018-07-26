@@ -419,18 +419,23 @@ def compute_Ji(I_gradx, I_grady, P, T, V, P_fk, V_sz):
 					def Pfk(P_F):
 						H_F = p_to_H(P_F)
 
-						H_fk_temp = np.concatenate((
+						H_fk_samp_temp = np.concatenate((
 							H_fk[0:H_F_ind, :, :],
 							H_F,
 							H_fk[H_F_ind + 1:, :, :]
 							), axis=0)
+
+						# invert to go from sampling parameters to coordinate parameters
+						H_fk_temp = np.linalg.inv(H_fk_samp_temp)
 
 						H_fk_mat = np.eye(3)
 						
 						for i in range(H_fk_temp.shape[0]):
 							H_fk_mat = np.dot(H_fk_temp[i, :, :], H_fk_mat)
 
-						P_fk = H_to_p(H_fk_mat)
+						# after combining, invert back to sampling parameters
+						H_fk_mat_samp = np.linalg.inv(H_fk_mat)
+						P_fk = H_to_p(H_fk_mat_samp)
 						P_fk = P_fk.squeeze(0)
 						return P_fk
 
@@ -452,12 +457,16 @@ def compute_Ji(I_gradx, I_grady, P, T, V, P_fk, V_sz):
 					def Pfk(P_F):
 						H_F = p_to_H(P_F)
 
-						H_kf_temp = np.concatenate((
+						H_kf_temp_samp = np.concatenate((
 							H_kf[0:H_F_ind, : , :],
 							H_F,
 							H_kf[H_F_ind + 1:, :, :]
 							), axis=0)
 
+						# invert to go from sampling parameters to coordinate parameters
+						H_kf_temp = np.linalg.inv(H_kf_temp_samp)
+						# but then, invert back because we are calculating are going backward from frame to template
+						# therefore it is no-op, however leaving it here for explanation
 						H_kf_temp_inv = np.linalg.inv(H_kf_temp)
 
 						H_fk_mat = np.eye(3)
@@ -465,7 +474,9 @@ def compute_Ji(I_gradx, I_grady, P, T, V, P_fk, V_sz):
 						for i in range(H_kf_temp_inv.shape[0]):
 							H_fk_mat = np.dot(H_fk_mat, H_kf_temp_inv[i, :, :])
 
-						P_fk = H_to_p(H_fk_mat)
+						# finally, invert from coordinate params back to sampling params
+						H_fk_mat_samp = np.linalg.inv(H_fk_mat)
+						P_fk = H_to_p(H_fk_mat_samp)
 						P_fk = P_fk.squeeze(0)
 						return P_fk
 
@@ -533,7 +544,7 @@ def compute_Pfk(P, T, V, V_sz):
 	Returns:
 		Pfk: Numpy array, warp parameters from images to templates, sigma x 8 x 1
 	'''
-
+	
 	sigma = V_sz.sum()
 
 	P_fk_all = np.zeros((sigma, 8, 1))
@@ -544,26 +555,38 @@ def compute_Pfk(P, T, V, V_sz):
 		for f in V[k_ind]:
 			# f and k index images I, F indexes P
 			if (f < k):
-				H_fk = p_to_H(P[f : k, :, :])
+				H_fk_samp = p_to_H(P[f : k, :, :])
 
+				# invert to go from sampling parameters to coordinate parameters
+				H_fk = np.linalg.inv(H_fk_samp)
+
+				# combine coordinate warpings
 				H_fk_mat = np.eye(3)
 
 				for i in range(H_fk.shape[0]):
-					H_fk_mat = np.dot(H_fk[i], H_fk_mat)
+					H_fk_mat = np.dot(H_fk[i, :, :], H_fk_mat)
 
-				P_fk = H_to_p(H_fk_mat)
+				# after combining, invert back to sampling parameters
+				H_fk_mat_samp = np.linalg.inv(H_fk_mat)
+				P_fk = H_to_p(H_fk_mat_samp)
 
 			else:
-				H_kf = p_to_H(P[k : f, :, :])
+				H_kf_samp = p_to_H(P[k : f, :, :])
 
+				# invert to go from sampling parameters to coordinate parameters
+				H_kf = np.linalg.inv(H_kf_samp)
+				# but then, invert back because we are calculating are going backward from frame to template
+				# therefore it is no-op, however leaving it here for explanation
 				H_kf_inv = np.linalg.inv(H_kf)
 
 				H_fk_mat = np.eye(3)
 
 				for i in range(H_kf_inv.shape[0]):
-					H_fk_mat = np.dot(H_fk_mat, H_kf_inv[i])
+					H_fk_mat = np.dot(H_fk_mat, H_kf_inv[i, :, :])
 
-				P_fk = H_to_p(H_fk_mat)
+				# finally, invert from coordinate params back to sampling params
+				H_fk_mat_samp = np.linalg.inv(H_fk_mat)
+				P_fk = H_to_p(H_fk_mat_samp)
 
 			P_fk_all[frame_id, :, :] = P_fk
 			frame_id = frame_id + 1
