@@ -25,7 +25,7 @@ import argparse
 import glob
 import matplotlib.pyplot as plt
 
-# example call: python3 forwardAdditiveLKBA.py seq ../test_img/aerial-img.jpg 
+# example call: python3 forwardAdditiveLKBA.py seq -img ../test_img/aerial-img.jpg 
 # crops aerial-img.jpg into several random crops that are composed as a sequence, then aligns them
 
 def optimize(I, P, T, V, tol, coeff_mult):
@@ -102,7 +102,7 @@ def optimize(I, P, T, V, tol, coeff_mult):
 
 	return P
 
-def optimize_wmap(I, P, T, V, P_init, M_feat, T_feat, tol):
+def optimize_wmap(I, P, T, V, P_init, M_feat, T_feat, tol, max_itr):
 	'''
 	Args:
 		I: Image sequence, 4D numpy array, num_frame x C x H x W
@@ -111,45 +111,114 @@ def optimize_wmap(I, P, T, V, P_init, M_feat, T_feat, tol):
 		T: Numpy vector containing indices from I which are templates, length k
 		V: Numpy array of numpy arrays, indicating the visibility neighborhood for each template
 		P_init: Absolute warp parameters relating map to first frame, 1 x 8 x 1
-		M_feat: Sequence of deep feature map images, 4D numpy array, k x C x H x W
-		T_feat: Template images from I deep feature extractions, 4D numpy array, k x Cf x H x W
+		M_feat: Sequence of deep feature map images, 4D numpy array, k x Cf x Hf x Wf
+		T_feat: Template images from I deep feature extractions, 4D numpy array, k x Cf x Hf x Wf
+		tol: tolerance of iteration criteria
+		max_itr: maximum number of optimization iterations
 	
 	Returns:
 		P_opt: Bundle adjusted warp parameter sequence, 3D numpy array, num_frame x 8 x 1
 	'''
-	
-	'''
-	dP = zeros
-	Mf_gradx, Mf_grady = gradient(M_feat)
+
+	num_frame = I.shape[0]
+
+	def size_fn(a):
+		return a.size
+
+	size_fn_vec = np.vectorize(size_fn)
+
+	V_sz = size_fn_vec(V)
+	sigma = V_sz.sum()
+
+	I_gradx = np.gradient(I, axis=3)
+	I_grady = np.gradient(I, axis=2)
+
+	Mf_gradx = np.gradient(M_feat, axis=3)
+	Mf_grady = np.gradient(M_feat, axis=2)
+
 	P_mk0 = compute_Pmk(P_init, P, T)
 
-	while (crit > tol):
+	dP = np.zeros([num_frame - 1, 8, 1])
+	crit = 0
+
+	itn = 1
+
+	while ((crit > tol) or (itn == 1)) and (itn < max_itr):
 		P_fk = compute_Pfk(P, T, V, V_sz)
 		P_mk = compute_Pmk(P_init, P, T)
 
-		r_i = compute_ri(I, T, V, P_fk, V_sz)
-		r_m = compute_rm(M_feat, T_feat, P_mk0, P_mk)
+		# warping: H_P * inv(H_P0) <- by rules of homography
+		P_mk_rel = np.matmul(P_mk, np.linalg.inv(P_mk0))
 
-		
-	'''
+		ri = compute_ri(I, T, V, P_fk, V_sz)
+		rm = compute_rm(M_feat, T_feat, P_mk_rel)
 
-def compute_rm(M_feat, T_feat, P_mk0, P_mk):
+		Ji = compute_Ji(I_gradx, I_grady, P, T, V, P_fk, V_sz)
+		Jm = compute_Jm(Mf_gradx, Mf_grady, P, T, P_mk_rel)
+
+		Ji_trans = Ji.swapaxes(2,3)
+		Ji_trans_Ji = np.matmul(Ji_trans, Ji)
+
+		Jm_trans = Jm.swapaxes(2,3)
+		Jm_trans_Jm = np.matmul(Jm_trans, Jm) 
+
+		Hm = np.sum(Jm_trans_Jm, axis=1)
+		Hi = np.sum(Ji_trans_Ji, axis=1)
+
+		invH = np.linalg.inv(Hm + Hi)
+
+		Jm_trans_rm = np.matmul(Jm_trans, rm_n)
+		Ji_trans_ri = np.matmul(Ji_trans, ri_n)
+
+		Jm_trans_rm_sum = np.sum(Jm_trans_rm, axis=1)
+		Ji_trans_ri_sum = np.sum(Ji_trans_ri, axis=1)
+
+		dP = np.matmul(invH, Jm_trans_rm_sum).squeeze(2)
+
+		P = P + dP
+
+		dp_norm = np.linalg.norm(dP, ord=2, axis=1)
+		crit = np.amax(dp_norm)
+
+		print('itn:  {:d}'.format(itn))
+		print('crit: {:.5f}'.format(crit))
+
+		itn = itn + 1
+
+	return P
+
+def compute_rm(M_feat, T_feat, P_mk_rel):
 	'''
 	Args:
-		M_feat: Sequence of deep feature map images, 4D numpy array, k x Cf x H x W
-		T_feat: Template images from I deep feature extractions, 4D numpy array, k x Cf x H x W
-		P_mk0: Numpy array, initial warp parameters from map images to templates, k x 8 x 1
-		P_mk: Numpy array, current warp parameters from map images to templates, k x 8 x 1
+		M_feat: Sequence of deep feature map images, 4D numpy array, k x Cf x Hf x Wf
+		T_feat: Template images from I deep feature extractions, 4D numpy array, k x Cf x Hf x Wf
+		P_mk_rel: Numpy array, warp parameters for each of the map images, k x 8 x 1
 
 	Returns:
-		rm: Numpy array, residuals of map images with templates, num_frame - 1 (duplicated dim.) x k x (Cf x H x W) x 1
+		rm: Numpy array, residuals of map images with templates, num_frame - 1 (duplicated dim.) x k x (Cf x Hf x Wf) x 1
 	'''
 
-	'''
-	warp M_feat with P_mk.bmm(inv(P_mk0))
-	rm = T_feat - M_feat
-	reshape, tile rm and return
-	'''
+	_, map_c, map_h, map_w = M_feat.shape
+
+	P_mk_rel_tens = torch.from_numpy(P_mk_rel).float()
+	M_feat_tens = torch.from_numpy(M_feat).float()
+
+	M_feat_warp_tens, M_feat_mask_tens = dlk.warp_hmg(M_feat_tens, P_mk_rel_tens)
+
+	M_feat_warp = M_feat_warp_tens.numpy()
+	M_feat_mask = M_feat_mask_tens.numpy()
+
+	M_feat_mask_tile = np.tile(np.expand_dims(M_feat_mask, 1), (1, img_c, 1, 1))
+
+	T_feat_mask = np.multiply(T_feat, M_feat_mask_tile)
+
+	r_m = T_feat_mask - M_feat_warp
+
+	r_m_rsh = r_m.reshape((k, map_c * map_h * map_w, 1))
+
+	r_m_tl = np.tile(r_m_rsh, (num_frames - 1, 1, 1, 1))
+
+	return r_m_tl
 
 def compute_ri(I, T, V, P_fk, V_sz):
 	'''
@@ -198,6 +267,111 @@ def compute_ri(I, T, V, P_fk, V_sz):
 
 	return r_ba
 
+def compute_Jm(Mf_gradx, Mf_grady, P_init, P, T, P_mk_rel):
+	'''
+	Args:
+		Mf_gradx: Map image gradients in x, numpy array, k x Cf x Hf x Wf
+		Mf_grady: Map image gradients in y, numpy array, k x Cf x Hf x Wf
+		P_init: Absolute warp parameters relating map to first frame, 1 x 8 x 1
+		P: Warp parameter sequence, 3D numpy array, num_frame x 8 x 1
+		T: Numpy vector containing indices from I which are templates, length k
+		P_mk_rel: Numpy array, warp parameters for each of the map images, k x 8 x 1
+
+	Returns:
+		Jm: Numpy array, dM/dW * dW/dPmk * dPmk/dPF, num_frame - 1 x k x (Cf x Hf x Wf) x 8
+	'''
+
+	k = T.shape[0]
+
+	gradMf_warpjac = compute_gradI_warpjac(Mf_gradx, Mf_grady, P_mk_rel)
+	gradMf_warpjac = np.tile(gradMf_warpjac, (num_frame - 1, 1, 1, 1))
+
+	gradPmk_PF = np.zeros((num_frame - 1, k, 8, 8))
+
+	for F in range(num_frame - 1):
+		k_ind = 0
+		for k in T:
+			H_init = p_to_H(P_init)
+			H_1k = p_to_H(P[0 : k, :, :])
+			H_mk = np.concatenate((
+				H_init,
+				H_k), axis=0)
+
+			H_F_ind = F + 1
+
+			def Pmk(P_F):
+				H_F = p_to_H(P_F)
+
+				H_mk_temp = np.concatenate((
+					H_mk[0 : H_F_ind, :, :],
+					H_F,
+					H_mk[H_F_ind + 1, :, :]
+					))
+
+				H_mk_mat = np.eye(3)
+
+				for i in range(H_mk_temp.shape[0]):
+					H_mk_mat = np.dot(H_mk_temp[i, :, :], H_mk_mat)
+
+				P_mk = H_to_p(H_mk_mat)
+				P_mk = P_mk.squeeze(0)
+
+				return P_mk
+
+			grad_P_mk = jacobian(Pmk)
+
+			P_F = H_to_p(H_mk[H_F_ind, :, :])
+			P_F = P_F.squeeze(0)
+
+			gradPmk_PF[H_F_ind, k_ind, :, :] = \
+				grad_P_mk(P_F).squeeze(axis=1).squeeze(axis=2)
+
+		k_ind = k_ind + 1
+
+	J_m = np.matmul(gradMf_warpjac, gradPmk_PF)
+
+	'''
+	gradMf_warpjac = compute_gradI_warpjac(Mf_gradx, Mf_grady, P_mk_rel)
+	gradMf_warpjac = np.tile(gradMf_warpjac, (num_frame - 1, 1, 1, 1))
+	
+	gradPmk_PF = np.zeros((num_frame - 1, k, 8, 8))
+
+	for F in range(num_frame - 1):
+		k_ind = 0
+		for k in T:
+			H_mk = [P_init, p_to_H(P[0 : k, :, :])]
+
+			def Pmk(P_F):
+				H_F = p_to_H(P_F)
+
+				H_mk_temp = 
+					[H_mk[0:F, :, :],
+					 H_F,
+					 H_mk[F + 1:, :, :]]
+
+				H_mk_mat = np.eye(3)
+				
+				for i in range(H_mk_temp.shape[0]):
+					H_mk_mat = np.dot(H_fk_temp[i, :, :], H_mk_mat)
+
+				P_mk = H_to_p(H_mk_mat)
+				P_mk = P_mk.squeeze(0)
+				return P_mk
+
+			grad_P_mk = jacobian(Pmk)
+
+			P_F = H_to_p(H_mk[F, :, :])
+			P_F = P_F.squeeze(0)
+
+			gradPmk_PF[F, k_ind, :, :] = 
+				grad_P_mk(P_F).squeeze(axis=1).squeeze(axis=2)
+
+		k_ind = k_ind + 1
+
+	J_m = np.matmul(gradMf_warpjac, gradPmk_PF)
+				
+	'''
+
 def compute_Ji(I_gradx, I_grady, P, T, V, P_fk, V_sz):
 	'''
 	Args:
@@ -210,7 +384,7 @@ def compute_Ji(I_gradx, I_grady, P, T, V, P_fk, V_sz):
 		V_sz: Numpy array, 1D, indicating number of images in each visibility neighborhood
 
 	Returns:
-		Ji: Numpy array, residuals of images with templates, num_frame - 1 x sigma x (C x H x W) x 8
+		Ji: Numpy array, dI/dW * dW/dPfk * dPfk/dPF, num_frame - 1 x sigma x (C x H x W) x 8
 	'''
 
 	sigma = V_sz.sum()
@@ -252,9 +426,9 @@ def compute_Ji(I_gradx, I_grady, P, T, V, P_fk, V_sz):
 							), axis=0)
 
 						H_fk_mat = np.eye(3)
-
+						
 						for i in range(H_fk_temp.shape[0]):
-							H_fk_mat = np.dot(H_fk_temp[i], H_fk_mat)
+							H_fk_mat = np.dot(H_fk_temp[i, :, :], H_fk_mat)
 
 						P_fk = H_to_p(H_fk_mat)
 						P_fk = P_fk.squeeze(0)
@@ -289,7 +463,7 @@ def compute_Ji(I_gradx, I_grady, P, T, V, P_fk, V_sz):
 						H_fk_mat = np.eye(3)
 
 						for i in range(H_kf_temp_inv.shape[0]):
-							H_fk_mat = np.dot(H_fk_mat, H_kf_temp_inv[i])
+							H_fk_mat = np.dot(H_fk_mat, H_kf_temp_inv[i, :, :])
 
 						P_fk = H_to_p(H_fk_mat)
 						P_fk = P_fk.squeeze(0)
@@ -325,10 +499,28 @@ def compute_Pmk(P_init, P, T):
 		P_mk: Warp parameters from map to templates, k x 8 x 1
 	'''
 
-	'''
-	create P_mk using reduce(dot, [P[0:T], P_init]) etc. etc.
+	P_mk = np.zeros((T.shape[0], 8, 1))
+
+	k_ind = 0
+	for k in T:
+		H_init = p_to_H(P_init)
+		H_k = p_to_H(P[0 : k, :, :])
+
+		H_mk = np.concatenate((
+			H_init,
+			H_k
+			), axis=0)
+
+		H_mk_mat = np.eye(3)
+
+		for i in range(H_mk.shape[0]):
+			H_mk_mat = np.dot(H_mk_mat, H_mk[i, :, :])
+
+		P_mk[k_ind, :, :] = H_to_p(H_mk_mat)
+
+		k_ind = k_ind + 1
+
 	return P_mk
-	'''
 
 def compute_Pfk(P, T, V, V_sz):
 	'''
@@ -592,7 +784,6 @@ def test_3img(args):
 
 	print(P_opt)
 
-
 def test_multi_img(args):
 	print("Running multi image test ...")
 
@@ -849,7 +1040,6 @@ def gen_rand_p(min_scale, max_scale, angle_range, projective_range, translation_
 
 	return p
 
-
 def warp_seq(img_tens, p_gt):
 
 	I = img_tens
@@ -877,13 +1067,173 @@ def open_img_as_tens(img_path, sz):
 
 	return img_tens
 
+def extract_map_templates(P_mk, M, T, img_c, img_h, img_w):
+	k_num = T.shape[0]
+
+	_, map_h, map_w = M.shape
+
+	M_tens = torch.from_numpy(M).unsqueeze(0).float()
+
+	M_tmpl = np.zeros((k_num, img_c, img_h, img_w))
+
+	aspect = img_w / img_h
+
+	adj_img_w = round(aspect * map_h)
+
+	# bounding box for crop, centered in middle of map coordinate system
+	left = round(map_w / 2 - adj_img_w / 2)
+	upper = 0
+	right = round(map_w /2 + adj_img_w / 2)
+	lower = map_h
+
+	k_ind = 0
+
+	plt.figure()
+	print('extracting map templates...')
+	for k in T:
+		P_mk_tens = torch.from_numpy(P_mk[k_ind : k_ind + 1, :, :]).float()
+
+		# no need to save mask, since the images extracted from the map (should) be valid at all pixels
+		M_warp_tens, _ = dlk.warp_hmg(M_tens, P_mk_tens)
+
+		plt.imshow(plt_axis_match_tens(M_warp_tens[0]))
+		plt.show()
+
+		M_warp_pil = transforms.ToPILImage()(M_warp_tens.squeeze(0))
+
+		# crop image segment matching template
+		M_warp_pil_crop = M_warp_pil.crop((left, upper, right, lower))
+
+		M_warp_pil_sm = M_warp_pil_crop.resize((img_w, img_h), Image.BILINEAR)
+
+		M_warp_np_sm = transforms.ToTensor()(M_warp_pil_sm)
+
+		M_tmpl[k_ind, :, :, :] = M_warp_np_sm
+
+		k_ind = k_ind + 1
+
+		print('... {:d}/{:d} ...'.format(k + 1, k_num))
+
+	return M_tmpl
+
+def optimize_wmap_test(args):
+	# python3 forwardAdditiveLKBA.py wmap -image_dir ../ppba_ds/village/geotagged-images-frame215/ -image_dir_ext *.JPG -motion_param_loc ../ppba_ds/village/P_frame215.csv -map_loc ../ppba_ds/village/map4.jpg -model_path ../models/conv_02_17_18_1833.pth -opt_img_height 400
+	opt_img_height = int(args.opt_img_height)
+
+	# I = load_I(args.image_dir, args.image_dir_ext, opt_img_height)
+	# np.save('I_frame215.npy',I)
+	I = np.load('I_frame215.npy')
+	_, img_c, img_h, img_w = I.shape
+
+	# motion parameters are in terms of map scale
+	P_init, P = load_P(args.motion_param_loc)
+
+	M = load_M(args.map_loc)
+
+	T = np.array([1, 6, 9, 12])
+
+	V = np.array(
+			[
+			 np.array([0, 1, 2, 4, 5]),
+			 np.array([4, 5, 7, 8]),
+			 np.array([7, 8, 10, 11]),
+			 np.array([10, 11, 13, 14, 15])
+			]
+	)
+
+	P_mk = compute_Pmk(P_init, P, T)
+
+	M_tens = torch.from_numpy(M).unsqueeze(0).float()
+	plt.figure()
+	M_warp_tens, _ = dlk.warp_hmg(M_tens, torch.from_numpy(P_mk[0:1, :, :]).float())
+	plt.imshow(plt_axis_match_tens(M_warp_tens[0]))
+	plt.show()
+
+	M_tmpl = extract_map_templates(P_mk, M, T, img_c, img_h, img_w)
+
+	deep_net = dlk.custom_net(MODEL_PATH)
+
+	T_tens = Variable(torch.from_numpy(I[T, :, :, :]).float())
+	T_tens_nmlz = dlk.normalize_img_batch(T_tens)
+	T_feat_tens = deep_net(T_tens_nmlz)
+	T_feat = T_feat_tens.data.numpy()
+
+	M_tmpl_tens = Variable(torch.from_numpy(M_tmpl).float())
+	M_tmpl_tens_nmlz = dlk.normalize_img_batch(M_tmpl_tens)
+	M_feat_tens = deep_net(M_tmpl_tens_nmlz)
+	M_feat = M_feat_tens.data.numpy()
+
+	P_opt = optimize_wmap(I, P, T, V, P_init, M_feat, T_feat, 1e-3, 200)
+
+def load_M(map_loc):
+	M_pil = Image.open(map_loc)
+
+	M_tens = transforms.ToTensor()(M_pil)
+
+	M = M_tens.numpy()
+
+	return M
+
+def load_I(image_dir, ext, scaled_im_height):
+
+	image_list = sorted(glob.glob(image_dir + ext))
+
+	sample_img = Image.open(image_list[0])
+
+	w1, h1 = sample_img.size
+
+	aspect = w1 / h1
+
+	scaled_im_width = round(aspect * scaled_im_height)
+
+	I = np.zeros((len(image_list), 3, scaled_im_height, scaled_im_width))
+
+	ten_perc = ceil(len(image_list)/10)
+
+	print("loading I ...")
+
+	for i, img_fname in enumerate(image_list):
+		curr_img = Image.open(img_fname)
+		curr_img_rz = curr_img.resize((scaled_im_width, scaled_im_height))
+		curr_img_rz_tens = transforms.ToTensor()(curr_img_rz)
+		I[i, :, :, :] = curr_img_rz_tens.numpy()
+
+		if (i % ten_perc == 0):
+			print("... {:.2%} ...".format(i/len(image_list)))
+
+	return I
+
+def load_P(P_loc):
+	P_all_inv = np.genfromtxt(P_loc, delimiter=',')
+
+	# input motion parameters are assumed to be not based on sampling
+	# but based on coordinate transformation, therefore neeed to invert
+
+	H_all_inv = p_to_H(np.expand_dims(P_all_inv, axis=2))
+
+	H_all = np.linalg.inv(H_all_inv)
+
+	P_all = H_to_p(H_all)
+
+	P_init = P_all[0, :]
+	P = P_all[1:, :]
+
+	P_init = np.expand_dims(P_init, axis=0)
+
+	return P_init, P
 
 if __name__ == "__main__":
 	np.set_printoptions(precision=4)
 
 	parser = argparse.ArgumentParser()
 	parser.add_argument("test")
-	parser.add_argument("img")
+	parser.add_argument("-img")
+	parser.add_argument("-image_dir")
+	parser.add_argument("-image_dir_ext")
+	parser.add_argument("-motion_param_loc")
+	parser.add_argument("-map_loc")
+	parser.add_argument("-model_path")
+	parser.add_argument('-opt_img_height')
 	args = parser.parse_args()
 
 	if (args.test == '3img'):
@@ -894,3 +1244,5 @@ if __name__ == "__main__":
 		test_2img(args)
 	elif (args.test == 'seq'):
 		test_img_seq(args)
+	elif (args.test == 'wmap'):
+		optimize_wmap_test(args)
